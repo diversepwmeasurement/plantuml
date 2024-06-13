@@ -1,31 +1,28 @@
-on:
-  issues:
-    types: [labeled]
-
 jobs:
   close-and-put-in-backlog:
     if: github.event.label.name == 'p:backlog'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - uses: actions/github-script@v7
-        with:
-          script: |
-            const welcomeMessage = `
-              Your issue is now part of the official [backlog](https://github.com/orgs/plantuml/projects/4).
-              For technical reason, it has been put at close state but it's really still open for us.
-              You can by the way go on and put any comment in this issue.
-
-              The main reason why we put this issue in the backlog is that we try to group issues together so that we fix them together, as similar issues often impact the same code area.
-
-              Please be patient, but stay tuned! 🙂`;
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: welcomeMessage
-            })
-      - uses: peter-evans/close-issue@v3
-      - uses: actions/add-to-project@v1.0.1
-        with:
-          project-url: https://github.com/orgs/plantuml/projects/4
-          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+    - continue-on-error: true
+      uses: actions/github-script@v7
+      with:
+        script: "const welcomeMessage = `\n  Your issue is now part of the official\
+          \ [backlog](https://github.com/orgs/plantuml/projects/4).\n  For technical\
+          \ reason, it has been put at close state but it's really still open for\
+          \ us.\n  You can by the way go on and put any comment in this issue.\n\n\
+          \  The main reason why we put this issue in the backlog is that we try to\
+          \ group issues together so that we fix them together, as similar issues\
+          \ often impact the same code area.\n\n  Please be patient, but stay tuned!\
+          \ \U0001F642`;\ngithub.rest.issues.createComment({\n  issue_number: context.issue.number,\n\
+          \  owner: context.repo.owner,\n  repo: context.repo.repo,\n  body: welcomeMessage\n\
+          })\n"
+    - continue-on-error: true
+      uses: peter-evans/close-issue@v3
+    - continue-on-error: true
+      uses: actions/add-to-project@v1.0.1
+      with:
+        github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+        project-url: https://github.com/orgs/plantuml/projects/4
+on:
+  repository_dispatch:
+    types: trigger-ga___close-and-put-in-backlog.yml

@@ -1,340 +1,370 @@
-name: CI
-
-on:
-  create:
-  pull_request:
-    types: [ opened, synchronize, reopened ]
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-  push:
-    branches:
-      - master
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-  workflow_dispatch:
-
 defaults:
   run:
     shell: bash
-
 jobs:
-  workflow_config:
-    runs-on: ubuntu-latest
+  build_artifacts:
+    needs:
+    - workflow_config
     outputs:
-      do_release: ${{ steps.config.outputs.do_release }}
-      do_snapshot_release: ${{ steps.config.outputs.do_snapshot_release }}
-      pom_version: ${{ steps.config.outputs.pom_version }}
-      do_javadoc: ${{ steps.config.outputs.do_javadoc }}
-      do_test_linux: ${{ steps.config.outputs.do_test_linux }}
-      do_test_windows: ${{ steps.config.outputs.do_test_windows }}
+      release_version: ${{ steps.version.outputs.release_version }}
+    runs-on: self-hosted
     steps:
-      - name: Checkout the repository
-        uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Checkout the repository
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up java
+      uses: actions/setup-java@v4
+      with:
+        cache: gradle
+        distribution: temurin
+        java-version: 17
+    - continue-on-error: true
+      name: Generate artifacts
+      run: "echo \"print gradle.properties\"\ncat gradle.properties\ngradle clean\
+        \ build \\\n  pdfJar \\\n  generateMetadataFileForMavenPublication generatePomFileForMavenPublication\
+        \ \\\n  -x test\nfind . -name \"*.jar\"\n"
+    - continue-on-error: true
+      env:
+        ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ARTIFACT_SIGNING_KEY }}
+        ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ARTIFACT_SIGNING_PASSPHRASE
+          }}
+      if: env.ORG_GRADLE_PROJECT_signingKey
+      name: Sign artifacts
+      run: 'gradle -i signMavenPublication signPdfJar
 
-      - name: Configure workflow
-        id: config
-        env:
-          ACTOR: ${{ github.actor }}
-          EVENT_ACTION: ${{ github.event.action }}
-          REF_TYPE: ${{ github.event.ref_type }}
-          REF: ${{ github.event.ref }}
-        run: |
-          cat <<-EOF
-            ::group::Debug Info
-            GITHUB_EVENT_NAME       : '${GITHUB_EVENT_NAME}'
-            EVENT_ACTION            : '${EVENT_ACTION}'
-            REF_TYPE                : '${REF_TYPE}'
-            REF                     : '${REF}'
-            ACTOR                   : '${ACTOR}'
-            GITHUB_REPOSITORY_OWNER : '${GITHUB_REPOSITORY_OWNER}'
-            ::endgroup::
-          EOF
+        ls -l build/libs
 
-          # Do a release when a git tag starting with 'v' has been created by a suitable user.
-          # (We match against github.repository_owner as a kludge so that forked repos can release themselves when testing the workflow)
-          if [[ "${GITHUB_EVENT_NAME}" == "create" && "${REF_TYPE}" == "tag" && "${REF}" == v* && \
-                ( "${ACTOR}" == "arnaudroques" || "${ACTOR}" == "${GITHUB_REPOSITORY_OWNER}" ) \
-             ]]; then
-            echo "::notice title=::This run will release '${REF}'"
-            echo "do_release=true" >> $GITHUB_OUTPUT
-            echo "pom_version=${REF#v}"
-            echo "pom_version=${REF#v}" >> $GITHUB_OUTPUT # pom_version is the tag without the 'v' prefix
-            echo "do_javadoc=true" >> $GITHUB_OUTPUT
-            echo "This run will update the Javadoc"
+        ls -l plantuml-asl/build/libs
 
-          elif [[ "${GITHUB_EVENT_NAME}" =~ push|workflow_dispatch && "${REF}" == "refs/heads/master" && "${ACTOR}" == "arnaudroques" ]]; then
-            echo "::notice title=::This run will release a snapshot"
-            echo "do_snapshot_release=true" >> $GITHUB_OUTPUT
-            V=$(perl -ne 'if (/return (\d{6,7});/) {$v=$1} if (/final int beta = (\d+);/) {$b=$1} END{print(substr($v, 0, 1),".", substr($v, 1, 4),"."); if ($b) {print(int(substr($v+1, 5)), "beta", $b);} else {print(int(substr($v, 5)))}}' src/net/sourceforge/plantuml/version/Version.java)
-            echo "pom_version=$V-SNAPSHOT"
-            echo "pom_version=$V-SNAPSHOT" >> $GITHUB_OUTPUT # pom_version is taken from Version.java
-            echo "do_javadoc=true" >> $GITHUB_OUTPUT
-            echo "This run will update the Javadoc"
+        ls -l plantuml-bsd/build/libs
 
-          else
-            echo "This run will NOT make a release"
-            echo "do_javadoc=false" >> $GITHUB_OUTPUT
-            echo "This run will NOT update the Javadoc"
-          fi
-          echo "do_test_linux=true" >> $GITHUB_OUTPUT
-          echo "do_test_windows=false" >> $GITHUB_OUTPUT
+        ls -l plantuml-epl/build/libs
 
-  # We run the tests on many OS / Java combinations but also the Compile step because some users build
-  # their own jars from source, so it is good for CI to check that is working on all combinations.
-  # We split windows and ubuntu because windows is so slow...
+        ls -l plantuml-lgpl/build/libs
+
+        ls -l plantuml-mit/build/libs
+
+        ls -l plantuml-gplv2/build/libs
+
+        '
+    - continue-on-error: true
+      id: version
+      name: Get release version
+      run: 'echo "release_version=$(gradle properties -q | grep "version:" | awk ''{print
+        $2}'')" >> $GITHUB_OUTPUT
+
+        '
+    - continue-on-error: true
+      name: Cache libs
+      uses: actions/cache/save@v4
+      with:
+        enableCrossOsArchive: true
+        key: libs-${{ github.run_id }}
+        path: 'build/libs
+
+          build/publications
+
+          plantuml-asl/build/libs
+
+          plantuml-bsd/build/libs
+
+          plantuml-epl/build/libs
+
+          plantuml-lgpl/build/libs
+
+          plantuml-mit/build/libs
+
+          plantuml-gplv2/build/libs
+
+          '
+  deploy_javadoc:
+    if: needs.workflow_config.outputs.do_javadoc == 'true'
+    needs:
+    - build_artifacts
+    - test_linux
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      name: Checkout the repository
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: 17
+    - continue-on-error: true
+      name: Build Javadoc
+      run: gradle javadoc
+    - continue-on-error: true
+      name: Deploy Javadoc to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v4
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./build/docs/javadoc
+  push_to_docker_registry:
+    if: needs.workflow_config.outputs.do_release == 'true'
+    needs:
+    - workflow_config
+    - upload
+    - test_linux
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      name: Check out the repo
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - continue-on-error: true
+      name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - continue-on-error: true
+      id: meta
+      name: Docker meta
+      uses: docker/metadata-action@v5
+      with:
+        images: '${{ github.repository }}
+
+          ghcr.io/${{ github.repository }}
+
+          '
+        tags: 'type=semver,pattern={{version}}
+
+          type=semver,pattern={{major}}.{{minor}}
+
+          type=semver,pattern={{major}}
+
+          type=sha
+
+          '
+    - continue-on-error: true
+      name: Log into Docker Hub
+      uses: docker/login-action@v3
+      with:
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+    - continue-on-error: true
+      name: Log in to GitHub Docker Registry
+      uses: docker/login-action@v3
+      with:
+        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: ghcr.io
+        username: ${{ github.repository_owner }}
+    - continue-on-error: true
+      name: Build/push container image
+      uses: docker/build-push-action@v5
+      with:
+        build-args: 'PLANTUML_VERSION=${{ github.event.ref }}
+
+          '
+        context: .
+        labels: ${{ steps.meta.outputs.labels }}
+        platforms: linux/amd64,linux/arm64
+        push: false
+        tags: ${{ steps.meta.outputs.tags }}
   test_linux:
     needs: workflow_config
+    runs-on: self-hosted
+    steps:
+    - continue-on-error: true
+      if: needs.workflow_config.outputs.do_test_linux == 'true'
+      name: Checkout the repository
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      if: needs.workflow_config.outputs.do_test_linux == 'true'
+      name: Set up java
+      uses: actions/setup-java@v4
+      with:
+        cache: gradle
+        distribution: temurin
+        java-version: ${{ matrix.java_version }}
+    - continue-on-error: true
+      if: needs.workflow_config.outputs.do_test_linux == 'true'
+      name: Compile
+      run: gradle -q compileJava --no-daemon
+    - continue-on-error: true
+      if: needs.workflow_config.outputs.do_test_linux == 'true'
+      name: Test
+      run: gradle test --no-daemon -i
+    - continue-on-error: true
+      if: needs.workflow_config.outputs.do_test_linux == 'true'
+      name: Upload test reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ github.run_number }}-${{ matrix.os }}-java-${{ matrix.java_version
+          }}-test-reports
+        path: build/reports/tests/
     strategy:
       fail-fast: false
       matrix:
-        java_version: [ 8, 17 ]
-        os: [ ubuntu-latest ]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout the repository
-        if: needs.workflow_config.outputs.do_test_linux == 'true'
-        uses: actions/checkout@v4
-
-      - name: Set up java
-        if: needs.workflow_config.outputs.do_test_linux == 'true'
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ matrix.java_version }}
-          distribution: temurin
-          cache: gradle
-
-      # Compile / Test / Package are separate steps so the reason for any failure is more obvious in GitHub UI
-      - name: Compile
-        if: needs.workflow_config.outputs.do_test_linux == 'true'
-        run: gradle -q compileJava --no-daemon
-
-      - name: Test
-        if: needs.workflow_config.outputs.do_test_linux == 'true'
-        run: gradle test --no-daemon -i
-
-      - name: Upload test reports
-        uses: actions/upload-artifact@v4
-        if: needs.workflow_config.outputs.do_test_linux == 'true'
-        with:
-          # Using github.run_number here to reduce confusion when downloading & comparing from several builds
-          name: ${{ github.run_number }}-${{ matrix.os }}-java-${{ matrix.java_version }}-test-reports
-          path: build/reports/tests/
-
-
-  build_artifacts:
-    needs: [ workflow_config ]
-    runs-on: ubuntu-latest
-    outputs:
-      release_version: ${{ steps.version.outputs.release_version }}
-    steps:
-      - name: Checkout the repository
-        uses: actions/checkout@v4
-      - name: Set up java
-        uses: actions/setup-java@v4
-        with:
-          java-version: 17
-          distribution: temurin
-          cache: gradle
-#      - name: Set version in gradle.properties
-#        if: env.POM_VERSION
-#        env:
-#          POM_VERSION: ${{ needs.workflow_config.outputs.pom_version }}
-#        run: |
-#          sed -i "s/version = .*/version = $POM_VERSION/" gradle.properties
-#          cat gradle.properties
-      - name: Generate artifacts
-        run: |
-          echo "print gradle.properties"
-          cat gradle.properties
-          gradle clean build \
-            pdfJar \
-            generateMetadataFileForMavenPublication generatePomFileForMavenPublication \
-            -x test
-          find . -name "*.jar"
-      - name: Sign artifacts
-        if: env.ORG_GRADLE_PROJECT_signingKey
-        env:
-          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ARTIFACT_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ARTIFACT_SIGNING_PASSPHRASE }}
-        run: |
-          gradle -i signMavenPublication signPdfJar
-          ls -l build/libs
-          ls -l plantuml-asl/build/libs
-          ls -l plantuml-bsd/build/libs
-          ls -l plantuml-epl/build/libs
-          ls -l plantuml-lgpl/build/libs
-          ls -l plantuml-mit/build/libs
-          ls -l plantuml-gplv2/build/libs
-      - name: Get release version
-        id: version
-        run: |
-          echo "release_version=$(gradle properties -q | grep "version:" | awk '{print $2}')" >> $GITHUB_OUTPUT
-      - name: Cache libs
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            build/libs
-            build/publications
-            plantuml-asl/build/libs
-            plantuml-bsd/build/libs
-            plantuml-epl/build/libs
-            plantuml-lgpl/build/libs
-            plantuml-mit/build/libs
-            plantuml-gplv2/build/libs
-          key: "libs-${{ github.run_id }}"
-          enableCrossOsArchive: true
-
-  deploy_javadoc:
-    needs: [ build_artifacts, test_linux ]
-    if: needs.workflow_config.outputs.do_javadoc == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout the repository
-        uses: actions/checkout@v4
-
-      - name: Set up java
-        uses: actions/setup-java@v4
-        with:
-          java-version: 17
-          distribution: temurin
-
-      - name: Build Javadoc
-        run: gradle javadoc
-
-      - name: Deploy Javadoc to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./build/docs/javadoc
-
-
+        java_version:
+        - 8
+        - 17
+        os:
+        - ubuntu-latest
   upload:
-    if: |
-      needs.workflow_config.outputs.do_release == 'true' ||
-      needs.workflow_config.outputs.do_snapshot_release == 'true'
-    needs: [ workflow_config, build_artifacts, test_linux ]
-    runs-on: ubuntu-latest
+    if: 'needs.workflow_config.outputs.do_release == ''true'' ||
+
+      needs.workflow_config.outputs.do_snapshot_release == ''true''
+
+      '
+    needs:
+    - workflow_config
+    - build_artifacts
+    - test_linux
+    runs-on: self-hosted
     steps:
-      - name: Checkout the repository
-        uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Checkout the repository
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      name: Set up java
+      uses: actions/setup-java@v4
+      with:
+        cache: gradle
+        distribution: temurin
+        java-version: 17
+    - continue-on-error: true
+      name: Restore Libs cache
+      uses: actions/cache/restore@v4
+      with:
+        enableCrossOsArchive: true
+        fail-on-cache-miss: true
+        key: libs-${{ github.run_id }}
+        path: 'build/libs
 
-      - name: Set up java
-        uses: actions/setup-java@v4
-        with:
-          java-version: 17
-          distribution: temurin
-          cache: gradle
+          build/publications
 
-      - name: Restore Libs cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            build/libs
-            build/publications
-            plantuml-asl/build/libs
-            plantuml-bsd/build/libs
-            plantuml-epl/build/libs
-            plantuml-lgpl/build/libs
-            plantuml-mit/build/libs
-            plantuml-gplv2/build/libs
-          key: "libs-${{ github.run_id }}"
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
+          plantuml-asl/build/libs
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          # Using github.run_number here to reduce confusion when downloading & comparing artifacts from several builds
-          name: ${{ github.run_number }}-artifacts
-          path: |
-            build/libs/*
-            build/publications/maven/*
-            plantuml-asl/build/libs
-            plantuml-bsd/build/libs
-            plantuml-epl/build/libs
-            plantuml-lgpl/build/libs
-            plantuml-mit/build/libs
-            plantuml-gplv2/build/libs
+          plantuml-bsd/build/libs
 
-      - name: Create snapshot
-        if: needs.workflow_config.outputs.do_snapshot_release == 'true'
-        env:
-          RELEASE_VERSION: ${{ needs.build_artifacts.outputs.RELEASE_VERSION }}
-          GITHUB_TOKEN: ${{ github.token }}
-          OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
-          OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
-          #do not remove signing key and password or signatures will not be published
-          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ARTIFACT_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ARTIFACT_SIGNING_PASSPHRASE }}
-        run: |
-          echo "print gradle.properties"
-          cat gradle.properties
-          echo "RELEASE_VERSION=$RELEASE_VERSION"
-          .github/scripts/release-snapshot.sh
+          plantuml-epl/build/libs
 
-      - name: Create release in GitHub and OSSRH
-        if: needs.workflow_config.outputs.do_release == 'true'
-        env:
-          RELEASE_VERSION: ${{ needs.build_artifacts.outputs.RELEASE_VERSION }}
-          GITHUB_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.ref }}
-          OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
-          OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
-          #do not remove signing key and password or signatures will not be published
-          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ARTIFACT_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ARTIFACT_SIGNING_PASSPHRASE }}
-        run: |
-          echo "print gradle.properties"
-          cat gradle.properties
-          echo "RELEASE_VERSION=$RELEASE_VERSION"
-          .github/scripts/release.sh
-          gradle --debug publish
+          plantuml-lgpl/build/libs
 
-  push_to_docker_registry:
-    needs: [ workflow_config, upload, test_linux ]
-    if: needs.workflow_config.outputs.do_release == 'true'
-    runs-on: ubuntu-latest
+          plantuml-mit/build/libs
+
+          plantuml-gplv2/build/libs
+
+          '
+    - continue-on-error: true
+      name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ github.run_number }}-artifacts
+        path: 'build/libs/*
+
+          build/publications/maven/*
+
+          plantuml-asl/build/libs
+
+          plantuml-bsd/build/libs
+
+          plantuml-epl/build/libs
+
+          plantuml-lgpl/build/libs
+
+          plantuml-mit/build/libs
+
+          plantuml-gplv2/build/libs
+
+          '
+    - continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ARTIFACT_SIGNING_KEY }}
+        ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ARTIFACT_SIGNING_PASSPHRASE
+          }}
+        OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
+        OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+        RELEASE_VERSION: ${{ needs.build_artifacts.outputs.RELEASE_VERSION }}
+      if: needs.workflow_config.outputs.do_snapshot_release == 'true'
+      name: Create snapshot
+      run: 'echo "print gradle.properties"
+
+        cat gradle.properties
+
+        echo "RELEASE_VERSION=$RELEASE_VERSION"
+
+        .github/scripts/release-snapshot.sh
+
+        '
+    - continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        ORG_GRADLE_PROJECT_signingKey: ${{ secrets.ARTIFACT_SIGNING_KEY }}
+        ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.ARTIFACT_SIGNING_PASSPHRASE
+          }}
+        OSSRH_PASSWORD: ${{ secrets.OSSRH_PASSWORD }}
+        OSSRH_USERNAME: ${{ secrets.OSSRH_USERNAME }}
+        RELEASE_VERSION: ${{ needs.build_artifacts.outputs.RELEASE_VERSION }}
+        TAG: ${{ github.event.ref }}
+      if: needs.workflow_config.outputs.do_release == 'true'
+      name: Create release in GitHub and OSSRH
+      run: 'echo "print gradle.properties"
+
+        cat gradle.properties
+
+        echo "RELEASE_VERSION=$RELEASE_VERSION"
+
+        .github/scripts/release.sh
+
+        gradle --debug publish
+
+        '
+  workflow_config:
+    outputs:
+      do_javadoc: ${{ steps.config.outputs.do_javadoc }}
+      do_release: ${{ steps.config.outputs.do_release }}
+      do_snapshot_release: ${{ steps.config.outputs.do_snapshot_release }}
+      do_test_linux: ${{ steps.config.outputs.do_test_linux }}
+      do_test_windows: ${{ steps.config.outputs.do_test_windows }}
+      pom_version: ${{ steps.config.outputs.pom_version }}
+    runs-on: self-hosted
     steps:
-      - name: Check out the repo
-        uses: actions/checkout@v4
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          # list of Docker images to use as base name for tags
-          images: |
-            ${{ github.repository }}
-            ghcr.io/${{ github.repository }}
-          # generate Docker tags based on the following events/attributes
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha
-      - name: Log into Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Log in to GitHub Docker Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build/push container image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          build-args: |
-            PLANTUML_VERSION=${{ github.event.ref }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+    - continue-on-error: true
+      name: Checkout the repository
+      uses: actions/checkout@v4
+    - continue-on-error: true
+      env:
+        ACTOR: ${{ github.actor }}
+        EVENT_ACTION: ${{ github.event.action }}
+        REF: ${{ github.event.ref }}
+        REF_TYPE: ${{ github.event.ref_type }}
+      id: config
+      name: Configure workflow
+      run: "cat <<-EOF\n  ::group::Debug Info\n  GITHUB_EVENT_NAME       : '${GITHUB_EVENT_NAME}'\n\
+        \  EVENT_ACTION            : '${EVENT_ACTION}'\n  REF_TYPE               \
+        \ : '${REF_TYPE}'\n  REF                     : '${REF}'\n  ACTOR         \
+        \          : '${ACTOR}'\n  GITHUB_REPOSITORY_OWNER : '${GITHUB_REPOSITORY_OWNER}'\n\
+        \  ::endgroup::\nEOF\n\n# Do a release when a git tag starting with 'v' has\
+        \ been created by a suitable user.\n# (We match against github.repository_owner\
+        \ as a kludge so that forked repos can release themselves when testing the\
+        \ workflow)\nif [[ \"${GITHUB_EVENT_NAME}\" == \"create\" && \"${REF_TYPE}\"\
+        \ == \"tag\" && \"${REF}\" == v* && \\\n      ( \"${ACTOR}\" == \"arnaudroques\"\
+        \ || \"${ACTOR}\" == \"${GITHUB_REPOSITORY_OWNER}\" ) \\\n   ]]; then\n  echo\
+        \ \"::notice title=::This run will release '${REF}'\"\n  echo \"do_release=true\"\
+        \ >> $GITHUB_OUTPUT\n  echo \"pom_version=${REF#v}\"\n  echo \"pom_version=${REF#v}\"\
+        \ >> $GITHUB_OUTPUT # pom_version is the tag without the 'v' prefix\n  echo\
+        \ \"do_javadoc=true\" >> $GITHUB_OUTPUT\n  echo \"This run will update the\
+        \ Javadoc\"\n\nelif [[ \"${GITHUB_EVENT_NAME}\" =~ push|workflow_dispatch\
+        \ && \"${REF}\" == \"refs/heads/master\" && \"${ACTOR}\" == \"arnaudroques\"\
+        \ ]]; then\n  echo \"::notice title=::This run will release a snapshot\"\n\
+        \  echo \"do_snapshot_release=true\" >> $GITHUB_OUTPUT\n  V=$(perl -ne 'if\
+        \ (/return (\\d{6,7});/) {$v=$1} if (/final int beta = (\\d+);/) {$b=$1} END{print(substr($v,\
+        \ 0, 1),\".\", substr($v, 1, 4),\".\"); if ($b) {print(int(substr($v+1, 5)),\
+        \ \"beta\", $b);} else {print(int(substr($v, 5)))}}' src/net/sourceforge/plantuml/version/Version.java)\n\
+        \  echo \"pom_version=$V-SNAPSHOT\"\n  echo \"pom_version=$V-SNAPSHOT\" >>\
+        \ $GITHUB_OUTPUT # pom_version is taken from Version.java\n  echo \"do_javadoc=true\"\
+        \ >> $GITHUB_OUTPUT\n  echo \"This run will update the Javadoc\"\n\nelse\n\
+        \  echo \"This run will NOT make a release\"\n  echo \"do_javadoc=false\"\
+        \ >> $GITHUB_OUTPUT\n  echo \"This run will NOT update the Javadoc\"\nfi\n\
+        echo \"do_test_linux=true\" >> $GITHUB_OUTPUT\necho \"do_test_windows=false\"\
+        \ >> $GITHUB_OUTPUT\n"
+name: CI
+on:
+  repository_dispatch:
+    types: trigger-ga___ci.yml
